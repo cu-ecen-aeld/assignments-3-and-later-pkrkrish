@@ -1,0 +1,1 @@
+finder-app/writer: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=6070e336cf5b2e72c260aef526c77bac4772aee0, for GNU/Linux 3.2.0, not stripped

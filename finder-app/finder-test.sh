@@ -1,6 +1,7 @@
 #!/bin/sh
 # Tester script for assignment 1 and assignment 2
 # Author: Siddhant Jajoo
+# Modified for assignment 2 to use C writer utility
 
 set -e
 set -u
@@ -9,6 +10,10 @@ NUMFILES=10
 WRITESTR=AELD_IS_FUN
 WRITEDIR=/tmp/aeld-data
 username=$(cat conf/username.txt)
+
+# Clean previous build artifacts and compile writer natively
+make -C "$(dirname "$0")" clean
+make -C "$(dirname "$0")"
 
 if [ $# -lt 3 ]
 then
@@ -33,7 +38,6 @@ rm -rf "${WRITEDIR}"
 
 assignment=$(cat "$(dirname "$0")/../conf/assignment.txt")
 
-
 if [ "$assignment" != "assignment1" ]
 then
     mkdir -p "$WRITEDIR"
@@ -46,9 +50,10 @@ then
     fi
 fi
 
+# Use writer (C program) instead of writer.sh
 for i in $(seq 1 $NUMFILES)
 do
-    $(dirname "$0")/writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+    "$(dirname "$0")/writer" "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
 OUTPUTSTRING=$($(dirname "$0")/finder.sh "$WRITEDIR" "$WRITESTR")
@@ -64,3 +69,4 @@ else
     echo "failed: expected ${MATCHSTR} in ${OUTPUTSTRING} but instead found"
     exit 1
 fi
+

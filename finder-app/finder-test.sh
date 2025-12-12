@@ -12,8 +12,7 @@ WRITEDIR=/tmp/aeld-data
 username=$(cat conf/username.txt)
 
 # Clean previous build artifacts and compile writer natively
-make -C "$(dirname "$0")" clean
-make -C "$(dirname "$0")"
+
 
 if [ $# -lt 3 ]
 then

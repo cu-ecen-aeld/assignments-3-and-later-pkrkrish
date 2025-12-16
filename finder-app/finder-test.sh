@@ -35,7 +35,7 @@ echo "Writing ${NUMFILES} files containing string ${WRITESTR} to ${WRITEDIR}"
 
 rm -rf "${WRITEDIR}"
 
-assignment=$(cat "$(dirname "$0")/../conf/assignment.txt")
+assignment=$(cat conf/assignment.txt)
 
 if [ "$assignment" != "assignment1" ]
 then
@@ -55,7 +55,7 @@ do
     "$(dirname "$0")/writer" "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
-OUTPUTSTRING=$($(dirname "$0")/finder.sh "$WRITEDIR" "$WRITESTR")
+OUTPUTSTRING=$(sh "$(dirname "$0")/finder.sh" "$WRITEDIR" "$WRITESTR")
 
 rm -rf /tmp/aeld-data
 

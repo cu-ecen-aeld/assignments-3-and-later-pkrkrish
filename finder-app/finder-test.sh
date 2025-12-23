@@ -1,7 +1,6 @@
 #!/bin/sh
-# Tester script for assignment 1 and assignment 2
-# Author: Siddhant Jajoo
-# Modified for assignment 2 to use C writer utility
+# Tester script for assignment 4
+# Modified to work inside Buildroot/QEMU environment
 
 set -e
 set -u
@@ -9,11 +8,12 @@ set -u
 NUMFILES=10
 WRITESTR=AELD_IS_FUN
 WRITEDIR=/tmp/aeld-data
-username=$(cat conf/username.txt)
 
-# Clean previous build artifacts and compile writer natively
+CONF_DIR=/etc/finder-app/conf
+username=$(cat ${CONF_DIR}/username.txt)
+assignment=$(cat ${CONF_DIR}/assignment.txt)
 
-
+# Parse arguments
 if [ $# -lt 3 ]
 then
     echo "Using default value ${WRITESTR} for string to write"
@@ -35,37 +35,32 @@ echo "Writing ${NUMFILES} files containing string ${WRITESTR} to ${WRITEDIR}"
 
 rm -rf "${WRITEDIR}"
 
-assignment=$(cat conf/assignment.txt)
-
 if [ "$assignment" != "assignment1" ]
 then
     mkdir -p "$WRITEDIR"
-
-    if [ -d "$WRITEDIR" ]
-    then
-        echo "$WRITEDIR created"
-    else
-        exit 1
-    fi
 fi
 
-# Use writer (C program) instead of writer.sh
+# Use writer from PATH
 for i in $(seq 1 $NUMFILES)
 do
-    "$(dirname "$0")/writer" "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+    writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
-OUTPUTSTRING=$(sh "$(dirname "$0")/finder.sh" "$WRITEDIR" "$WRITESTR")
+# Run finder.sh from PATH
+OUTPUTSTRING=$(finder.sh "$WRITEDIR" "$WRITESTR")
 
 rm -rf /tmp/aeld-data
 
-set +e
-echo "${OUTPUTSTRING}" | grep "${MATCHSTR}"
+# Write output to required file for Assignment 4
+RESULT_FILE=/tmp/assignment4-result.txt
+echo "${OUTPUTSTRING}" > "${RESULT_FILE}"
+
+# Check result
+echo "${OUTPUTSTRING}" | grep "${MATCHSTR}" >/dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo "success"
     exit 0
 else
-    echo "failed: expected ${MATCHSTR} in ${OUTPUTSTRING} but instead found"
+    echo "failed: expected ${MATCHSTR} in ${OUTPUTSTRING}"
     exit 1
 fi
-

@@ -50,7 +50,7 @@ do
 done
 
 # Requirement 4b: Run 'finder.sh' from PATH (no ./ prefix)
-OUTPUTSTRING=$(/usr/bin/finder.sh "$WRITEDIR" "$WRITESTR
+OUTPUTSTRING=$(/usr/bin/finder.sh "$WRITEDIR" "$WRITESTR")
 
 # Requirement 4c: Write output of the finder command to /tmp/assignment4-result.txt
 RESULT_FILE=/tmp/assignment4-result.txt

@@ -10,34 +10,57 @@
 #include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdbool.h>
+#include <sys/queue.h>
 
 #define PORT "9000"
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 #define RECV_BUF_SIZE 1024
 
+/* * Polyfill for SLIST_FOREACH_SAFE if not provided by the system's <sys/queue.h>
+ */
+#ifndef SLIST_FOREACH_SAFE
+#define SLIST_FOREACH_SAFE(var, head, field, tvar) \
+    for ((var) = SLIST_FIRST((head));              \
+        (var) && ((tvar) = SLIST_NEXT((var), field), 1); \
+        (var) = (tvar))
+#endif
+
 int server_fd = -1;
 volatile sig_atomic_t caught_signal = 0;
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Requirement 2.i: Signal handler for Graceful Exit
+/* Structure for thread management */
+struct thread_info {
+    pthread_t thread_id;
+    int client_fd;
+    bool thread_complete;
+    SLIST_ENTRY(thread_info) entries;
+};
+
+/* Head of the linked list */
+SLIST_HEAD(thread_list, thread_info) head = SLIST_HEAD_INITIALIZER(head);
+
+/* Signal handler for SIGINT and SIGTERM */
 void signal_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
         syslog(LOG_INFO, "Caught signal, exiting");
         caught_signal = 1;
         if (server_fd != -1) {
-            // Unblock accept() by shutting down the socket
             shutdown(server_fd, SHUT_RDWR);
         }
     }
 }
 
-// Requirement 5: Daemon mode support (Fork after bind)
+/* Daemonization logic */
 void daemonize() {
     pid_t pid = fork();
-    if (pid < 0) exit(-1);
-    if (pid > 0) exit(0); // Parent exits
-
-    if (setsid() < 0) exit(-1); 
-    if (chdir("/") < 0) exit(-1);
+    if (pid < 0) exit(EXIT_FAILURE);
+    if (pid > 0) exit(EXIT_SUCCESS);
+    if (setsid() < 0) exit(EXIT_FAILURE);
+    if (chdir("/") < 0) exit(EXIT_FAILURE);
 
     int dev_null = open("/dev/null", O_RDWR);
     if (dev_null != -1) {
@@ -48,117 +71,150 @@ void daemonize() {
     }
 }
 
-int main(int argc, char *argv[]) {
-    openlog("aesdsocket", LOG_PID, LOG_USER);
-
-    // Setup signals
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signal_handler;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-    // Socket setup
-    struct addrinfo hints, *servinfo;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    if (getaddrinfo(NULL, PORT, &hints, &servinfo) != 0) return -1;
-
-    server_fd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
-    if (server_fd == -1) {
-        freeaddrinfo(servinfo);
-        return -1;
-    }
-
-    int yes = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-
-    // Requirement 5: Ensure bind is successful before daemonizing
-    if (bind(server_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1) {
-        close(server_fd);
-        freeaddrinfo(servinfo);
-        return -1;
-    }
-
-    freeaddrinfo(servinfo);
-
-    // Requirement 5: Check for daemon argument
-    if (argc > 1 && strcmp(argv[1], "-d") == 0) {
-        daemonize();
-    }
-
-    if (listen(server_fd, 10) == -1) {
-        close(server_fd);
-        return -1;
-    }
-
+/* 10-second RFC 2822 Timestamp Thread */
+void *timestamp_thread(void *arg) {
     while (!caught_signal) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
-        if (client_fd == -1) {
-            if (caught_signal) break;
-            continue;
+        // Sleep for 10 seconds, but check for signal frequently to exit fast
+        for (int i = 0; i < 10 && !caught_signal; i++) {
+            sleep(1);
         }
+        if (caught_signal) break;
 
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
-        syslog(LOG_INFO, "Accepted connection from %s", ip_str);
+        time_t now = time(NULL);
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        char time_str[128];
+        // Format: "timestamp:Mon, 02 Jan 2006 15:04:05 -0700"
+        strftime(time_str, sizeof(time_str), "%a, %d %b %Y %T %z", &tm_info);
 
-        FILE *f = fopen(DATA_FILE, "a+");
-        if (!f) {
-            close(client_fd);
-            continue;
+        pthread_mutex_lock(&file_mutex);
+        FILE *fp = fopen(DATA_FILE, "a");
+        if (fp) {
+            fprintf(fp, "timestamp:%s\n", time_str);
+            fclose(fp);
         }
+        pthread_mutex_unlock(&file_mutex);
+    }
+    return NULL;
+}
 
-        char *buf = malloc(RECV_BUF_SIZE);
-        if (!buf) {
-            fclose(f);
-            close(client_fd);
-            continue;
-        }
+/* Connection Handler Thread */
+void *connection_handler(void *arg) {
+    struct thread_info *tinfo = (struct thread_info *)arg;
+    char *buf = malloc(RECV_BUF_SIZE);
+    if (!buf) goto out;
 
-        ssize_t bytes_recv;
-        size_t current_packet_size = 0;
+    size_t buf_size = RECV_BUF_SIZE;
+    size_t used = 0;
 
-        // Requirement 2.e: Receive data until newline
-        while ((bytes_recv = recv(client_fd, buf + current_packet_size, RECV_BUF_SIZE - 1, 0)) > 0) {
-            current_packet_size += bytes_recv;
-            if (buf[current_packet_size - 1] == '\n') {
-                fwrite(buf, 1, current_packet_size, f);
-                fflush(f);
-                break; 
-            }
-            char *new_buf = realloc(buf, current_packet_size + RECV_BUF_SIZE);
-            if (!new_buf) {
-                free(buf);
-                break;
-            }
+    while (1) {
+        ssize_t rc = recv(tinfo->client_fd, buf + used, buf_size - used, 0);
+        if (rc <= 0) break;
+        used += rc;
+
+        if (used >= buf_size) {
+            buf_size += RECV_BUF_SIZE;
+            char *new_buf = realloc(buf, buf_size);
+            if (!new_buf) { free(buf); buf = NULL; goto out; }
             buf = new_buf;
         }
 
-        // Requirement 2.f: Return full content
-        rewind(f);
-        char read_buf[RECV_BUF_SIZE];
-        size_t bytes_read;
-        while ((bytes_read = fread(read_buf, 1, sizeof(read_buf), f)) > 0) {
-            send(client_fd, read_buf, bytes_read, 0);
-        }
-
-        fclose(f);
-        free(buf);
-        close(client_fd);
-        syslog(LOG_INFO, "Closed connection from %s", ip_str);
+        if (buf[used - 1] == '\n') break;
     }
 
-    if (server_fd != -1) close(server_fd);
-    unlink(DATA_FILE);
-    syslog(LOG_INFO, "Cleanup complete");
-    closelog();
+    if (used > 0) {
+        pthread_mutex_lock(&file_mutex);
+        int fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd != -1) {
+            write(fd, buf, used);
+            close(fd);
+        }
 
+        int rfd = open(DATA_FILE, O_RDONLY);
+        if (rfd != -1) {
+            char read_buf[RECV_BUF_SIZE];
+            ssize_t r;
+            while ((r = read(rfd, read_buf, sizeof(read_buf))) > 0) {
+                send(tinfo->client_fd, read_buf, r, 0);
+            }
+            close(rfd);
+        }
+        pthread_mutex_unlock(&file_mutex);
+    }
+
+out:
+    if (buf) free(buf);
+    close(tinfo->client_fd);
+    tinfo->thread_complete = true;
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    openlog("aesdsocket", LOG_PID, LOG_USER);
+
+    struct sigaction sa = { .sa_handler = signal_handler };
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM, .ai_flags = AI_PASSIVE };
+    struct addrinfo *servinfo;
+    if (getaddrinfo(NULL, PORT, &hints, &servinfo) != 0) return -1;
+
+    server_fd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
+    int yes = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    if (bind(server_fd, servinfo->ai_addr, servinfo->ai_addrlen) != 0) {
+        freeaddrinfo(servinfo);
+        return -1;
+    }
+    freeaddrinfo(servinfo);
+
+    if (argc > 1 && strcmp(argv[1], "-d") == 0) daemonize();
+
+    if (listen(server_fd, 10) != 0) return -1;
+
+    pthread_t ts_tid;
+    pthread_create(&ts_tid, NULL, timestamp_thread, NULL);
+
+    while (!caught_signal) {
+        struct sockaddr_in caddr;
+        socklen_t clen = sizeof(caddr);
+        int cfd = accept(server_fd, (struct sockaddr *)&caddr, &clen);
+        if (cfd == -1) break;
+
+        struct thread_info *node = malloc(sizeof(struct thread_info));
+        node->client_fd = cfd;
+        node->thread_complete = false;
+
+        if (pthread_create(&node->thread_id, NULL, connection_handler, node) == 0) {
+            SLIST_INSERT_HEAD(&head, node, entries);
+        } else {
+            close(cfd);
+            free(node);
+        }
+
+        /* Safe Cleanup of finished threads */
+        struct thread_info *it, *tmp;
+        SLIST_FOREACH_SAFE(it, &head, entries, tmp) {
+            if (it->thread_complete) {
+                pthread_join(it->thread_id, NULL);
+                SLIST_REMOVE(&head, it, thread_info, entries);
+                free(it);
+            }
+        }
+    }
+
+    /* Shutdown and Wait for all threads */
+    pthread_join(ts_tid, NULL);
+    struct thread_info *it, *tmp;
+    SLIST_FOREACH_SAFE(it, &head, entries, tmp) {
+        pthread_join(it->thread_id, NULL);
+        SLIST_REMOVE(&head, it, thread_info, entries);
+        free(it);
+    }
+
+    unlink(DATA_FILE);
+    pthread_mutex_destroy(&file_mutex);
+    closelog();
     return 0;
 }
